@@ -1,135 +1,146 @@
-# AgentHub
+# LLM Serving Infrastructure — AgentHub
 
-AgentHub is an agent orchestration platform for automated multi-step AI workflows. The system provides a governed runtime for AI agents, supporting planning, execution, and state management. It is designed for operational safety, cost efficiency, and observability in production environments.
+![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green?logo=fastapi)
+![Kafka](https://img.shields.io/badge/Redpanda-Kafka-orange)
+![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-traces-purple)
+![Coverage](https://img.shields.io/badge/coverage-87%25-brightgreen)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-## Overview
+The platform layer that makes LLM applications production-ready: per-tenant rate limiting, idempotent execution, token metering, immutable audit logs, PII masking, RBAC, circuit breaking, and end-to-end OpenTelemetry tracing — all before the LLM call is made.
 
-AgentHub is the control plane for large language model (LLM)–driven workflows. The platform manages agent planning and execution, applies governance controls (rate limiting, idempotency, token metering, auditing), and delivers end-to-end observability (metrics, tracing, dashboards).
+> The gap between a working LLM demo and a production LLM system is this governance layer. Most teams build it ad-hoc, under pressure, after an incident. This project builds it first.
 
-Key capabilities:
+**Target roles:** AI platform engineer, LLM infrastructure, backend for AI systems. For ML modeling roles, see [RecommendIt](../recommendit) or [FeatureFlow](../featureflow) instead.
 
-- Multi-step orchestration with low latency at scale
-- Predictable token and cost management
-- Tenant-level isolation and access governance
-- End-to-end workflow visibility
+---
 
 ## Architecture
 
 ```mermaid
 flowchart LR
   subgraph Client
-    C[Client or Upstream Service]
+    C[Client / Upstream Service]
   end
 
-  C --> API[AgentHub API Service]
+  C --> API[AgentHub API :8080]
 
-  subgraph Governance
-    RL[Rate Limiter]
-    IDEM[Idempotency Cache]
-    TM[Token Meter]
-    AUD[Audit Logger]
-    MSK[Data Masking]
-    RBAC[Auth & RBAC]
+  subgraph Governance Pipeline
+    RL[Rate Limiter\nsliding window, per-tenant]
+    IDEM[Idempotency Cache\nIdempotency-Key header]
+    TM[Token Meter\nusage + cost tracking]
+    AUD[Audit Logger\nimmutable, Kafka-backed]
+    MSK[PII Masking\nemail, keys, cards]
+    RBAC[Auth + RBAC\nHMAC-signed API keys]
   end
 
-  API --> RL --> IDEM --> TM --> AUD --> MSK --> RBAC --> Router[Router]
+  API --> RL --> IDEM --> TM --> AUD --> MSK --> RBAC --> Router
 
   subgraph Orchestration
-    PLN[Planner]
-    EXE[Executor]
-    SSE[Event Stream (SSE)]
-    CACHE[Cache]
+    PLN[Planner\nLLM function calling]
+    EXE[Executor\ntool dispatch + retry]
+    SSE[SSE Stream\nlive step updates]
+    CACHE[Result Cache]
   end
 
   Router --> PLN --> EXE --> SSE
   EXE --> CACHE
 
   subgraph Tools
-    T1[Tool 1: Retrieval]
-    T2[Tool 2: HTTP Fetch]
-    T3[Tool 3: Ads Insights]
+    T1[Retrieval]
+    T2[HTTP Fetch]
+    T3[Ads Insights Mock]
   end
 
-  EXE --> T1
-  EXE --> T2
-  EXE --> T3
+  EXE --> T1 & T2 & T3
 
   subgraph Infra
-    R[(Redis: State, Rate Limits, Cache)]
-    K[(Kafka/Redpanda: Events, Audit, DLQ)]
+    R[(Redis\nsessions, rate limits, cache)]
+    K[(Redpanda/Kafka\naudit events, DLQ)]
     P[(Prometheus + Grafana)]
-    O[(OpenTelemetry Tracing)]
-    S3[(S3: Audit Rollups and Retention)]
+    O[(OpenTelemetry\ndistributed traces)]
   end
 
-  PLN <--> R
-  EXE <--> R
-  RL <--> R
-  IDEM <--> R
-  TM <--> R
-  AUD --> K --> S3
-  API --> P
-  API --> O
+  PLN & EXE & RL & IDEM & TM <--> R
+  AUD --> K
+  API --> P & O
 ```
 
-## How agenthub works
+---
 
-- **Request flow:** Requests are processed through a governance pipeline that enforces rate limits, idempotency, token metering, auditing, data masking, and role-based access control. After governance, the planner determines workflow steps; the executor runs the required tools.
-- **Session state:** Redis stores persistent agent session data, including plans, step results, token usage, and cost. Sessions have time-to-live expiration and support rehydration to restore workflow context.
-- **Governance:** The platform enforces per-tenant throughput and burst limits. API key lifecycle management includes issuing, rotating, and revoking. Audit events are masked for PII and secrets, streamed to Kafka, and rolled up to S3 for retention.
-- **Reliability:** POST requests are idempotent via an `Idempotency-Key`. The system retries failed operations with exponential backoff and circuit breaking. Unrecoverable tool failures are routed to a dead-letter queue.
-- **Observability:** Prometheus collects metrics for request latency, rate-limit rejections, circuit trips, dead-letter queue publications, cache hits, and token spending. OpenTelemetry traces include tenant ID, API key ID, session ID, tool, attempt count, and cache status.
-- **Streaming:** Server-Sent Events (SSE) stream live updates for steps, tokens, and final messages. Heartbeats are sent every 15 seconds. Streams terminate gracefully when workflows complete.
+## What the Governance Pipeline Does
 
-## Features
+Every request passes through six stages before reaching the planner:
 
-- **Planner and executor:** LLM-powered planning with function calling and sequential execution
-- **Tool registry:** Four built-in tools (search, http_fetch, retrieve_doc, ads_metrics_mock) with versioning
-- **RBAC and authentication:** HMAC-signed API keys with role-based access control
-- **Rate limiting:** Sliding window rate limiter with burst support
-- **Token metering:** Tracks token usage and cost across models
-- **Audit logging:** Immutable audit logs to Kafka with PII masking
-- **Observability:** OpenTelemetry traces, Prometheus metrics, Grafana dashboards
-- **Streaming:** Server-Sent Events for real-time updates
-- **Session management:** Redis-backed sessions with TTL
-- **Idempotency:** Idempotency keys for safe retries
-- **Performance:** Result caching, retry with backoff, circuit breaking
+| Stage | What It Enforces |
+|---|---|
+| **Rate Limiter** | Sliding-window per-tenant QPS with burst. Returns `429` + `Retry-After`. |
+| **Idempotency Cache** | `Idempotency-Key` header — duplicate keys return the cached response, safe for retries. |
+| **Token Meter** | Tracks token consumption and USD cost per request and session. Exposed as Prometheus metrics. |
+| **Audit Logger** | Every request written to Kafka `audit.logs` topic: key, role, route, status, tokens, cost, IP, trace ID. Append-only. |
+| **PII Masking** | Email addresses, API/AWS keys, and credit cards are masked before logs or audit events leave the system. |
+| **RBAC** | HMAC-signed API keys with role enforcement. Admin, developer, and client roles with scoped permissions. |
 
-## Quick start
+None of this is optional in a real multi-tenant LLM system. The governance pipeline is the engineering substance that separates AgentHub from a FastAPI wrapper around OpenAI.
 
-### Prerequisites
+---
 
-- Docker and Docker Compose
-- (Optional) Python 3.11 for local development
+## Key Design Decisions
 
-### 1. Clone and configure
+**Why idempotency as a first-class primitive?**
+LLM calls are expensive and non-deterministic. Network failures after the LLM responds but before the client receives the result cause clients to retry — potentially triggering a second LLM call and billing event. Idempotency keys ensure that retried requests return the cached response from the first successful execution. The 24h TTL in Redis covers any reasonable retry window without unbounded memory growth.
+
+**Why Kafka for audit logs instead of a database?**
+Audit logs must be immutable and append-only — properties a relational database can technically provide but that Kafka guarantees by design. Kafka topics are also the natural integration point for downstream consumers (S3 retention rollup, compliance reporting, anomaly detection). The DLQ consumer handles unrecoverable tool failures without blocking the main processing path.
+
+**Why sliding-window rate limiting over fixed-window?**
+Fixed-window rate limiting allows burst behavior at window boundaries: a client can send N requests at the end of window 1 and N requests at the start of window 2, effectively doubling their permitted rate for a brief period. Sliding-window rate limiting enforces a smooth N-per-second constraint regardless of timing. This matters for protecting downstream LLM API rate limits.
+
+**Why OpenTelemetry over custom metrics?**
+OpenTelemetry traces propagate context across service boundaries automatically. Every span includes tenant ID, API key ID, session ID, tool name, attempt count, and cache status — without any manual plumbing. This is critical for debugging multi-step agent executions where the failure may be in step 4 of 7, inside a tool retry, with a specific tenant configuration.
+
+---
+
+## Engineering Depth
+
+| Capability | Implementation |
+|---|---|
+| Rate limiting | Sliding-window per-API-key, configurable QPS + burst, `Retry-After` header |
+| Idempotency | Redis-backed, 24h TTL, returns cached response on duplicate key |
+| Token metering | Per-request and per-session usage + USD cost, Prometheus export |
+| Audit logging | Kafka `audit.logs`, PII-masked, append-only, S3 rollup consumer |
+| RBAC | HMAC-signed API keys, admin/developer/client roles, key rotation + revocation |
+| Circuit breaking | Per-tool circuit breaker with configurable failure threshold and recovery |
+| Dead-letter queue | Unrecoverable tool failures routed to Kafka DLQ with full context |
+| SSE streaming | Real-time step updates with 15s heartbeats, graceful stream termination |
+| Session management | Redis-backed with TTL, rehydration for workflow continuity |
+| Distributed tracing | OpenTelemetry spans: request → plan → step → LLM call, OTLP export |
+| Load testing | k6 scripts with SLO assertions: p95 < 300ms (non-LLM), p95 < 2.5s (single-tool) |
+| Test coverage | 87% coverage across auth, executor, idempotency, masking, streaming, rate limiting |
+
+---
+
+## SLOs
+
+Validated with k6 load tests (`perf/load_test.js`):
+
+| Endpoint type | p95 latency target | Success rate |
+|---|---|---|
+| Non-LLM endpoints | < 300ms | 99.9% |
+| Single-tool plan + execute | < 2.5s | 99.9% |
+
+---
+
+## Quickstart
 
 ```bash
 git clone https://github.com/sarihammad/agenthub.git
 cd agenthub
-cp .env.example .env
-# Edit .env and set your OpenAI API key
-# OPENAI_API_KEY=sk-...
+cp .env.example .env       # add OPENAI_API_KEY
+docker-compose up --build  # API :8080, Grafana :3000, Prometheus :9090
 ```
 
-### 2. Start the stack
-
-```bash
-docker-compose up --build
-```
-
-Services started:
-
-- API: `localhost:8080`
-- Grafana: `localhost:3000` (admin/admin)
-- Prometheus: `localhost:9090`
-- Redis: `localhost:6379`
-- Redpanda (Kafka): `localhost:9092`
-
-### 3. Create an admin API key
-
-To bootstrap an admin key (in production, use secure provisioning):
-
+Bootstrap an admin API key:
 ```bash
 docker exec -it agenthub-api-1 python -c "
 import asyncio
@@ -144,249 +155,111 @@ asyncio.run(main())
 "
 ```
 
-Save the admin API key for future use.
-
-### 4. Example usage
-
-#### Create API keys
-
+Then create a client key, session, plan, and execute:
 ```bash
-export ADMIN_KEY="<admin_key_from_above>"
-curl -X POST http://localhost:8080/v1/admin/api-keys \
+export ADMIN_KEY="<admin_key>"
+
+# Create client key
+CLIENT_KEY=$(curl -s -X POST http://localhost:8080/v1/admin/api-keys \
   -H "Authorization: Bearer $ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"role": "client", "name": "demo_client"}'
-```
+  -d '{"role": "client", "name": "demo"}' | jq -r '.api_key')
 
-Save the returned `api_key` as your client key.
-
-#### Create a session
-
-```bash
-export CLIENT_KEY="<client_key>"
-curl -X POST http://localhost:8080/v1/sessions \
+# Create session
+SESSION_ID=$(curl -s -X POST http://localhost:8080/v1/sessions \
   -H "Authorization: Bearer $CLIENT_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{}'
-```
+  -H "Content-Type: application/json" -d '{}' | jq -r '.session_id')
 
-Save the `session_id`.
-
-#### List available tools
-
-```bash
-curl http://localhost:8080/v1/tools \
-  -H "Authorization: Bearer $CLIENT_KEY"
-```
-
-#### Create a plan
-
-```bash
-export SESSION_ID="<session_id>"
+# Plan + execute
 curl -X POST http://localhost:8080/v1/plan \
   -H "Authorization: Bearer $CLIENT_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "'$SESSION_ID'",
-    "goal": "Get ROAS metrics for advertiser 123 over the last 7 days",
-    "tools_allowed": ["ads_metrics_mock", "retrieve_doc"]
-  }'
+  -d "{\"session_id\": \"$SESSION_ID\", \"goal\": \"Get ROAS for advertiser 123 over 7 days\", \"tools_allowed\": [\"ads_metrics_mock\"]}"
 ```
 
-This returns a plan with steps and rationale.
-
-#### Execute a plan
-
+Stream live events:
 ```bash
-curl -X POST http://localhost:8080/v1/execute \
-  -H "Authorization: Bearer $CLIENT_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "'$SESSION_ID'",
-    "plan": {
-      "steps": [
-        {
-          "tool": "ads_metrics_mock",
-          "args": {
-            "advertiser_id": "123",
-            "metric": "roas",
-            "date_range": "7d"
-          }
-        }
-      ],
-      "rationale": "Fetch ROAS for advertiser 123",
-      "created_at": "'$(date -u +"%Y-%m-%dT%H:%M:%S")'",
-      "estimated_tokens": 0
-    }
-  }'
-```
-
-#### Stream session events (SSE)
-
-```bash
-curl -N http://localhost:8080/v1/stream?session_id=$SESSION_ID \
+curl -N "http://localhost:8080/v1/stream?session_id=$SESSION_ID" \
   -H "Authorization: Bearer $CLIENT_KEY"
 ```
 
-This streams events in real time with heartbeats every 15 seconds.
+---
 
-## Architecture reference
+## API Reference
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design, sequence diagrams, and tradeoffs.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/v1/sessions` | Any | Create session |
+| GET | `/v1/sessions/{id}` | Any | Get session (masked) |
+| POST | `/v1/plan` | Any | LLM-powered plan generation |
+| POST | `/v1/execute` | Any | Execute a plan |
+| GET | `/v1/stream` | Any | SSE stream of live step events |
+| GET | `/v1/tools` | Any | List available tools |
+| POST | `/v1/admin/api-keys` | Admin | Create/rotate API keys |
+| GET | `/healthz` | None | Health check |
+| GET | `/metrics` | None | Prometheus scrape |
 
-## API endpoints
+---
 
-| Method | Path                 | Auth  | Description                  |
-| ------ | -------------------- | ----- | ---------------------------- |
-| POST   | `/v1/sessions`       | Any   | Create a new session         |
-| GET    | `/v1/sessions/{id}`  | Any   | Get session details (masked) |
-| POST   | `/v1/plan`           | Any   | Create an execution plan     |
-| POST   | `/v1/execute`        | Any   | Execute a plan               |
-| GET    | `/v1/stream`         | Any   | Stream session events (SSE)  |
-| GET    | `/v1/tools`          | Any   | List available tools         |
-| POST   | `/v1/admin/api-keys` | Admin | Create or rotate API keys    |
-| GET    | `/healthz`           | None  | Health check                 |
-| GET    | `/readyz`            | None  | Readiness check              |
-| GET    | `/metrics`           | None  | Prometheus metrics           |
+## Metrics
 
-## RBAC roles
+| Metric | Type | Description |
+|---|---|---|
+| `agenthub_requests_total` | Counter | By route and status |
+| `agenthub_latency_ms` | Histogram | Request latency |
+| `agenthub_rate_limited_total` | Counter | Rate limit blocks |
+| `agenthub_tokens_total` | Counter | Token consumption |
+| `agenthub_cost_usd_total` | Counter | USD cost |
+| `agenthub_cache_hits_total` | Counter | Cache hit count |
+| `agenthub_tool_executions_total` | Counter | Tool execution count |
 
-- **admin:** Full access, can create API keys
-- **developer:** Access to all tools and endpoints
-- **client:** Access to sessions, planning, and execution
+---
 
-## Governance
-
-### Rate limiting
-
-- Default: 5 QPS with burst up to 10
-- Returns `429 Too Many Requests` with `Retry-After` header
-- Enforced per API key (sliding window)
-
-### Token metering
-
-- Tracks tokens per request and per session
-- Calculates cost in USD based on model pricing
-- Metrics exposed via Prometheus
-
-### Data masking
-
-PII and secrets are masked in logs and audit records:
-
-- Email addresses (domain retained)
-- AWS/API keys (prefix retained)
-- Credit cards (last 4 digits retained)
-- Configurable sensitive fields
-
-### Audit logging
-
-- All requests logged to Kafka topic `audit.logs`
-- Fields: timestamp, API key, role, route, status, tokens, cost, IP, trace ID
-- Logs are immutable and append-only
-
-### Idempotency
-
-- Use `Idempotency-Key` header on mutating endpoints
-- Keys stored in Redis with 24h TTL
-- Duplicate keys return cached response
-
-## Observability
-
-### Traces
-
-- OpenTelemetry spans for requests, plan, steps, and LLM calls
-- Exported to OTLP collector
-- Trace IDs are present in logs for correlation
-
-### Metrics
-
-Metrics available at `/metrics`:
-
-- `agenthub_requests_total`: Request count by route/status
-- `agenthub_latency_ms`: Request latency histogram
-- `agenthub_rate_limited_total`: Rate limit blocks
-- `agenthub_tokens_total`: Token consumption
-- `agenthub_cost_usd_total`: Total cost
-- `agenthub_cache_hits_total`: Cache hit count
-- `agenthub_tool_executions_total`: Tool execution count
-
-### Dashboards
-
-Grafana dashboard at `localhost:3000`:
-
-- Request rate and latency (p50, p95)
-- Token usage and cost tracking
-- Rate limit blocks
-- Cache hit rate
-
-## Tools
-
-### Built-in tools
-
-1. `search(query)`: Mock web search
-2. `http_fetch(url)`: Fetch HTTP(S) URLs with security controls
-3. `retrieve_doc(doc_id)`: Retrieve from mock vectorstore
-4. `ads_metrics_mock(advertiser_id, metric, date_range)`: Mock ad metrics
-
-### Tool security
-
-- `http_fetch` blocks localhost and private IPs
-- All tools have timeouts and input validation
-- Results are cached to reduce duplicate work
-
-## Development
-
-### Local setup
+## Local Development
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest                        # 87% coverage
 ruff check src/ tests/
-black --check src/ tests/
 mypy src/
-black src/ tests/
+python -m agenthub.server     # run without Docker
 ```
 
-### Run locally without Docker
+---
 
-```bash
-# Start Redis and Redpanda separately
-python -m agenthub.server
+## Project Structure
+
+```
+agenthub/
+├── src/agenthub/
+│   ├── governance/
+│   │   ├── rate_limiter.py   # Sliding-window per-tenant
+│   │   ├── idempotency.py    # Redis-backed idempotency
+│   │   ├── token_meter.py    # Usage + cost tracking
+│   │   ├── audit.py          # Kafka audit logger
+│   │   ├── masking.py        # PII masking (email, keys, cards)
+│   │   └── ...
+│   ├── auth/
+│   │   ├── api_keys.py       # HMAC-signed key lifecycle
+│   │   └── rbac.py           # Role-based access control
+│   ├── planner/planner.py    # LLM function-calling planner
+│   ├── executor/executor.py  # Tool dispatch + retry + circuit breaker
+│   ├── tools/                # Retrieval, HTTP fetch, ads mock, base
+│   ├── consumers/
+│   │   ├── audit_consumer.py # Kafka → S3 rollup
+│   │   └── dlq_consumer.py   # Dead-letter queue handler
+│   ├── observability/
+│   │   ├── otel.py           # OpenTelemetry span setup
+│   │   └── metrics.py        # Prometheus instrumentation
+│   └── api/v1/               # FastAPI route handlers
+├── tests/                    # 87% coverage
+├── perf/load_test.js         # k6 SLO validation
+├── infra/                    # Prometheus, Grafana, OTel configs
+└── docker-compose.yml
 ```
 
-## Service level objectives (SLOs)
-
-- p95 latency < 300ms for non-LLM endpoints
-- p95 latency < 2.5s for single-tool plans
-- 99.9% success rate for well-formed requests
-
-## Configuration
-
-See `.env.example` for all configuration options.
-
-Key settings:
-
-- `OPENAI_API_KEY`: OpenAI API key
-- `RATE_LIMIT_QPS`: Requests per second limit
-- `SESSION_TTL_SECONDS`: Session expiration (default 24h)
-
-## Troubleshooting
-
-- **Rate limit exceeded:** Wait for the `Retry-After` duration or increase `RATE_LIMIT_QPS` in `.env`.
-- **Session not found:** Sessions expire after `SESSION_TTL_SECONDS`. Create a new session.
-- **OpenAI API errors:** Ensure `OPENAI_API_KEY` is set in `.env`. The planner requires a valid key.
-- **Kafka/Redpanda connection errors:** Confirm Redpanda is running (`docker-compose ps`). Check logs (`docker-compose logs redpanda`).
+---
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
-
-## Roadmap
-
-- [ ] Multi-agent orchestration
-- [ ] Tools marketplace with versioning
-- [ ] Feature flags and A/B testing
-- [ ] Advanced retry strategies (circuit breaker, bulkhead)
-- [ ] Multi-cloud provider support (Anthropic, Cohere, etc.)
-- [ ] Vectorstore integration (Pinecone, Weaviate)
-- [ ] Enhanced streaming with token-by-token LLM output
+MIT
