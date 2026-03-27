@@ -1,4 +1,4 @@
-# LLM Serving Infrastructure — AgentHub
+# LLM Serving Infrastructure
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green?logo=fastapi)
@@ -7,9 +7,7 @@
 ![Coverage](https://img.shields.io/badge/coverage-87%25-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-The platform layer that makes LLM applications production-ready: per-tenant rate limiting, idempotent execution, token metering, immutable audit logs, PII masking, RBAC, circuit breaking, and end-to-end OpenTelemetry tracing — all before the LLM call is made.
-
-**Target roles:** AI platform engineer, LLM infrastructure, backend for AI systems. For ML modeling roles, see [RecommendIt](../recommendit) or [FeatureFlow](../featureflow) instead.
+LLM agent runtime with rate limiting, idempotency, audit logging, token metering, and streaming.
 
 ---
 
