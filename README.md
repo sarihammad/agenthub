@@ -9,8 +9,6 @@
 
 The platform layer that makes LLM applications production-ready: per-tenant rate limiting, idempotent execution, token metering, immutable audit logs, PII masking, RBAC, circuit breaking, and end-to-end OpenTelemetry tracing — all before the LLM call is made.
 
-> The gap between a working LLM demo and a production LLM system is this governance layer. Most teams build it ad-hoc, under pressure, after an incident. This project builds it first.
-
 **Target roles:** AI platform engineer, LLM infrastructure, backend for AI systems. For ML modeling roles, see [RecommendIt](../recommendit) or [FeatureFlow](../featureflow) instead.
 
 ---
@@ -81,23 +79,17 @@ Every request passes through six stages before reaching the planner:
 | **PII Masking** | Email addresses, API/AWS keys, and credit cards are masked before logs or audit events leave the system. |
 | **RBAC** | HMAC-signed API keys with role enforcement. Admin, developer, and client roles with scoped permissions. |
 
-None of this is optional in a real multi-tenant LLM system. The governance pipeline is the engineering substance that separates AgentHub from a FastAPI wrapper around OpenAI.
-
 ---
 
 ## Key Design Decisions
 
-**Why idempotency as a first-class primitive?**
-LLM calls are expensive and non-deterministic. Network failures after the LLM responds but before the client receives the result cause clients to retry — potentially triggering a second LLM call and billing event. Idempotency keys ensure that retried requests return the cached response from the first successful execution. The 24h TTL in Redis covers any reasonable retry window without unbounded memory growth.
+**Idempotency as a first-class primitive:** LLM calls are expensive and non-deterministic. Network failures after the LLM responds but before the client receives the result cause retries and duplicate billing. Idempotency keys cache the first successful response; 24h TTL covers any reasonable retry window.
 
-**Why Kafka for audit logs instead of a database?**
-Audit logs must be immutable and append-only — properties a relational database can technically provide but that Kafka guarantees by design. Kafka topics are also the natural integration point for downstream consumers (S3 retention rollup, compliance reporting, anomaly detection). The DLQ consumer handles unrecoverable tool failures without blocking the main processing path.
+**Kafka for audit logs:** Append-only by design, not by convention. Also the natural integration point for downstream consumers: S3 retention rollup, compliance reporting, anomaly detection. The DLQ handles unrecoverable tool failures without blocking the main path.
 
-**Why sliding-window rate limiting over fixed-window?**
-Fixed-window rate limiting allows burst behavior at window boundaries: a client can send N requests at the end of window 1 and N requests at the start of window 2, effectively doubling their permitted rate for a brief period. Sliding-window rate limiting enforces a smooth N-per-second constraint regardless of timing. This matters for protecting downstream LLM API rate limits.
+**Sliding-window rate limiting:** Fixed-window allows burst at boundaries — N requests end of window 1, N at start of window 2. Sliding-window enforces a smooth constraint regardless of timing. Matters when protecting downstream LLM API rate limits.
 
-**Why OpenTelemetry over custom metrics?**
-OpenTelemetry traces propagate context across service boundaries automatically. Every span includes tenant ID, API key ID, session ID, tool name, attempt count, and cache status — without any manual plumbing. This is critical for debugging multi-step agent executions where the failure may be in step 4 of 7, inside a tool retry, with a specific tenant configuration.
+**OpenTelemetry over custom metrics:** Traces propagate context across service boundaries automatically. Every span includes tenant ID, API key ID, session ID, tool name, attempt count, and cache status — critical for debugging multi-step agent executions.
 
 ---
 
